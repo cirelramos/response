@@ -75,7 +75,7 @@ trait ResponseTrait
 
     }
 
-    private function errorResponseWithMessage(
+    public function errorResponseWithMessage(
         $data = [],
         $message = '',
         $code = Response::HTTP_SERVICE_UNAVAILABLE
