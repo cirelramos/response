@@ -2,11 +2,15 @@
 
 namespace Cirelramos\Response\Traits;
 
-use Cirelramos\ErrorNotification\Services\GetInfoFromExceptionService;
-use Cirelramos\Logs\Services\SendLogUserRequestResponseService;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Response;
+use Illuminate\Support\Collection;
+use Cirelramos\ErrorNotification\Services\GetInfoFromExceptionService;
+use Cirelramos\Logs\Facades\LogConsoleFacade;
+use Cirelramos\Logs\Services\GetTrackerService;
+use Cirelramos\Logs\Services\SendLogUserRequestResponseService;
+use Cirelramos\Response\Services\GetResponseClientExceptionService;
 
 /**
  *
@@ -33,13 +37,23 @@ trait ResponseTrait
 
     private function encode_array($data)
     {
-        $data = is_array($data) ? $data : $data->toArray();
+        $data = $data instanceof Collection ? $data->toArray() : $data ;
         foreach ($data as $key => $value) {
             if (is_array($value) || is_object($value)) {
-                $data[ $key ] = $this->encode_array($value);
+                if(is_object($data)){
+                    $data->$key = $this->encodeArray($value);
+                }
+                if(is_array($data)){
+                    $data[ $key ] = $this->encodeArray($value);
+                }
             } elseif (is_string($value)) {
                 $value        = utf8_encode($value);
-                $data[ $key ] = html_entity_decode($value);
+                if(is_object($data)){
+                    $data->$key = html_entity_decode($value);
+                }
+                if(is_array($data)){
+                    $data[ $key ] = html_entity_decode($value);
+                }
             }
         }
 
@@ -65,22 +79,70 @@ trait ResponseTrait
             $message = $exception->getMessage();
             $code    = Response::HTTP_NOT_FOUND;
         }
-        $infoException = GetInfoFromExceptionService::execute($exception);
-        SendLogUserRequestResponseService::execute($infoException);
-        if (config('app.debug') === true) {
-            return $this->errorResponseWithMessage($infoException, $message, $code);
+
+        if ($code < Response::HTTP_CONTINUE || $code > Response::HTTP_NETWORK_AUTHENTICATION_REQUIRED) {
+            $code = Response::HTTP_SERVICE_UNAVAILABLE;
         }
 
-        return $this->errorResponseWithMessage([], $message, $code);
+        $infoException = GetInfoFromExceptionService::execute($exception);
+        SendLogUserRequestResponseService::execute($infoException);
+        LogConsoleFacade::full()->tracker()->log('catch-error: ' . $exception->getMessage(), $infoException);
+
+
+        [$code, $message, $infoException] = GetResponseClientExceptionService::execute(
+            $code,
+            $message,
+            $infoException,
+            $exception
+        );
+        $error = $this->reformatError($message);
+        if (env('APP_DEBUG') === true) {
+            return $this->errorResponseWithMessage($infoException, $message, $code, $error);
+        }
+
+        return $this->errorResponseWithMessage([], $message, $code, $error);
 
     }
 
     public function errorResponseWithMessage(
         $data = [],
         $message = '',
-        $code = Response::HTTP_SERVICE_UNAVAILABLE
+        $code = Response::HTTP_SERVICE_UNAVAILABLE,
+        $error = []
     ): JsonResponse {
-        return response()->json([ 'code' => $code, 'message' => $message, 'data' => $data ], $code);
+        return response()->json(
+            ['error' => $error, 'code' => $code, 'message' => $message, 'data' => $data],
+            $code
+        );
+    }
 
+    /**
+     * @param $message
+     * @param $code
+     * @param $data
+     * @return mixed
+     */
+    public function errorResponse($message, $code, $data = []) {
+        if ($code < Response::HTTP_CONTINUE || $code > Response::HTTP_NETWORK_AUTHENTICATION_REQUIRED) {
+            $code = Response::HTTP_SERVICE_UNAVAILABLE;
+        }
+        $error = $this->reformatError($message);
+        return response()->json(['error' => $error, 'code' => $code, 'message'=> $message, 'data' => $data], $code);
+    }
+
+    /**
+     * @param $message
+     * @return array|\string[][]
+     */
+    public function reformatError($message): array
+    {
+        $error = [];
+        if (is_string($message)) {
+            $error = ['message' => [$message]];
+        }
+        if(is_array($message)){
+            $error = $message;
+        }
+        return $error;
     }
 }
